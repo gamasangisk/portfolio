@@ -233,41 +233,44 @@ async function fetchFx(){
   return null;
 }
 let busy=false, queued=false;
-async function refresh(auto){
-  if(busy){ if(!auto) queued=true; return; }   // 수동 클릭은 대기열에 저장 → 끝나면 즉시 재실행
+async function refresh(){
+  if(busy){ queued=true; return; }               // 진행 중 클릭 → 끝나는 즉시 한 번 더
   busy=true;
   const btn=document.getElementById("refresh"), st=document.getElementById("status");
-  if(!auto){ btn.disabled=true; btn.textContent="시세 로딩 중…"; st.className=""; st.textContent=""; }
-  else{ st.className=""; st.textContent=S.up?`자동 갱신 중… (마지막 ${S.up})`:"자동 갱신 중…"; }
-  const fxJob=fetchFx().catch(()=>null);          // 환율은 별도 병행
-  let got={};
-  const key=(S.key||"").trim();
-  if(key){                                           // 1차: 미국 종목 → Finnhub 직접 (병렬)
-    await Promise.all(S.h.filter(h=>!h.y.includes(".")).map(h=>
-      finnhubQuote(h.y,key).then(q=>{got[h.y]=q;}).catch(()=>{})));
-  }
-  const rest=S.h.filter(h=>!got[h.y]);               // 2차: 해외 + 나머지 → 야후, 3개씩
-  for(const grp of chunks(rest,3)){
-    await Promise.all(grp.map(h=>quote(h.y).then(q=>{got[h.y]=q;}).catch(()=>{})));
-  }
+  btn.disabled=true; btn.textContent="시세 로딩 중…"; st.className="";
+  st.textContent="수신 중 0/"+S.h.length+"…";
   let ok=0;
-  S.h.forEach(h=>{
-    const q=got[h.y];
-    if(q){ S.px[h.t]=q; h.c=q.cur; ok++; }                 // 통화 자동 감지
-  });
-  const fxv=await fxJob; if(fxv!=null) S.fx=fxv;
+  try{
+    const fxJob=fetchFx().catch(()=>null);
+    const key=(S.key||"").trim();
+    const got={};
+    const apply=(h,q)=>{ got[h.y]=q; S.px[h.t]=q; h.c=q.cur; ok++;
+      st.textContent=`수신 중 ${ok}/${S.h.length}…`; };
+    if(key){                                     // 1차: 미국 종목 → Finnhub 직접 (병렬, 즉시 반영)
+      await Promise.all(S.h.filter(h=>!h.y.includes(".")).map(h=>
+        finnhubQuote(h.y,key).then(q=>apply(h,q)).catch(()=>{})));
+      if(ok>0) render();
+    }
+    const deadline=Date.now()+20000;             // 전체 20초 제한
+    const rest=S.h.filter(h=>!got[h.y]);         // 2차: 해외 + 나머지 → 야후, 3개씩
+    for(const grp of chunks(rest,3)){
+      if(Date.now()>deadline) break;
+      await Promise.all(grp.map(h=>quote(h.y).then(q=>apply(h,q)).catch(()=>{})));
+      if(ok>0) render();
+    }
+    const fxv=await fxJob; if(fxv!=null) S.fx=fxv;
+  }catch(e){ /* 어떤 오류도 아래 마무리로 */ }
   if(ok>0){
     S.up=new Date().toLocaleString("ko-KR",{month:"numeric",day:"numeric",hour:"2-digit",minute:"2-digit"});
+    st.className="";
     st.textContent=`마지막 업데이트 ${S.up} · ${ok}/${S.h.length}종목${(S.key||"").trim()?"":" · 키 등록 시 더 빨라집니다"}`;
-  }else if(!auto){
-    st.className="err";
-    st.textContent="시세를 받지 못했어요. 잠시 후 다시 누르거나, 보유종목 탭에서 Finnhub 키를 등록해 보세요.";
   }else{
-    st.textContent=S.up?`마지막 업데이트 ${S.up}`:"";
+    st.className="err";
+    st.textContent="시세를 받지 못했어요. 잠시 후 다시 누르거나, 보유종목 탭에서 Finnhub 키를 확인해 주세요.";
   }
   save(); render();
   btn.disabled=false; btn.textContent="시세 새로고침"; busy=false;
-  if(queued){ queued=false; refresh(false); }
+  if(queued){ queued=false; refresh(); }
 }
 
 /* ─────────── 계산 (모든 합산은 USD 환산 기준) ─────────── */
@@ -375,7 +378,7 @@ window.addHolding=()=>{
   if(!t) return; const T=t.trim().toUpperCase();
   const disp=T.split(".")[0];
   if(S.h.some(h=>h.y===T||h.t===disp)) return;
-  S.h.push({t:disp,n:T,y:T,q:0,a:0}); save(); render(); refresh(true);
+  S.h.push({t:disp,n:T,y:T,q:0,a:0}); save(); render(); refresh();
 };
 window.saveSnapshot=()=>{
   const c=calc();
@@ -393,12 +396,12 @@ function showTab(p){
   document.querySelectorAll("#tabs button").forEach(b=>b.classList.toggle("on",b.dataset.p===p));
 }
 document.querySelectorAll("#tabs button").forEach(b=>b.onclick=()=>showTab(b.dataset.p));
-document.getElementById("refresh").onclick=()=>refresh(false);
+document.getElementById("refresh").onclick=()=>refresh();
 
-/* ─────────── 시작: 즉시 렌더 → 자동 로딩 → 90초 주기 갱신 ─────────── */
+/* ─────────── 시작: 저장된 시세 즉시 표시. 갱신은 버튼으로만 (수동 전용) ─────────── */
 render();
-refresh(true);
-/* 수동 전용: 앱을 열 때 1회만 자동, 이후에는 버튼으로만 갱신 */
+document.getElementById("status").textContent =
+  S.up ? `마지막 업데이트 ${S.up} · 버튼을 눌러 갱신` : "버튼을 눌러 시세를 가져오세요";
 </script>
 </body>
 </html>
