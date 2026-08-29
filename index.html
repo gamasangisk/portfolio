@@ -198,16 +198,18 @@ const PROX=[
   u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u),
   u=>"https://api.codetabs.com/v1/proxy?quest="+encodeURIComponent(u),
 ];
-async function viaProxy(url){
+async function viaProxyText(url){
   for(const p of PROX){
     try{
       const r=await fetch(p(url),{signal:AbortSignal.timeout(9000),cache:"no-store"});
       if(!r.ok) continue;
-      return await r.json();
+      const t=await r.text();
+      if(t) return t;
     }catch(e){}
   }
   throw new Error("proxy");
 }
+async function viaProxy(url){ return JSON.parse(await viaProxyText(url)); }
 function metaToQuote(m){
   if(!m||typeof m.regularMarketPrice!=="number") return null;
   const prev=m.chartPreviousClose||m.previousClose;
@@ -216,10 +218,22 @@ function metaToQuote(m){
     cur:m.currency||"USD"};
 }
 async function quote(sym){
-  const j=await viaProxy(`https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1d&_=${Date.now()}`);
-  const q=metaToQuote(j?.chart?.result?.[0]?.meta);
-  if(!q) throw new Error("nodata");
-  return q;
+  for(const host of ["query1","query2"]){
+    try{
+      const j=await viaProxy(`https://${host}.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1d&_=${Date.now()}`);
+      const q=metaToQuote(j?.chart?.result?.[0]?.meta);
+      if(q) return q;
+    }catch(e){}
+  }
+  /* 3차 폴백: Stooq (런던 .L 종목) */
+  if(sym.endsWith(".L")){
+    const ss=(sym.slice(0,-2)+".UK").toLowerCase();
+    const t=await viaProxyText(`https://stooq.com/q/l/?s=${ss}&f=sd2t2ohlcv&h&e=csv&_=${Date.now()}`);
+    const line=(t.trim().split("\n")[1]||"");
+    const close=parseFloat(line.split(",")[6]);
+    if(close>0) return {p:close, c:null, cur:sym==="VWRA.L"?"USD":"GBp"};
+  }
+  throw new Error("nodata");
 }
 async function fetchFx(){
   try{
@@ -347,7 +361,12 @@ function render(){
         <span class="mut">평가 ${u0(r.mv)}${r.live?"":" (평단 기준)"}</span>
         <span class="pl ${cls(r.pnl)}">${r.pnl==null?"":u0(r.pnl)+" · "+p1(r.ret)}</span>
         <button class="ghost" onclick="delH(${i})">삭제</button>
-      </div>
+      </div>${r.live?"":`
+      <div style="margin-top:8px">
+        <div style="font-size:10px;color:var(--sub);margin-bottom:3px">시세 미수신 — 현재가 직접 입력 (${r.cur})</div>
+        <input type="number" inputmode="decimal" placeholder="IBKR에서 본 가격 입력"
+          onchange="setManual(${i},this.value)" style="background:#fff">
+      </div>`}
     </div>`).join("");
 
   /* 기록 */
@@ -372,6 +391,8 @@ function render(){
 
 /* ─────────── 조작 ─────────── */
 window.upd=(i,f,v)=>{S.h[i][f]=+v||0;save();render();};
+window.setManual=(i,v)=>{ const h=S.h[i], p=+v;
+  if(p>0){ S.px[h.t]={p, c:null, cur:h.c||"USD", manual:true}; save(); render(); } };
 window.delH=i=>{if(confirm(S.h[i].t+" 종목을 삭제할까요?")){S.h.splice(i,1);save();render();}};
 window.addHolding=()=>{
   const t=prompt("야후 파이낸스 티커를 입력하세요\n미국: AAPL · 싱가포르: D05.SI (DBS) · 런던: VWRA.L");
